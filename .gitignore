@@ -1,0 +1,9 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.nb.html
+reference/*
+*.sql
+*DS_Store
+data/german*

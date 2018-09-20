@@ -3,6 +3,7 @@
 .RData
 .Ruserdata
 *.nb.html
+*.pdf
 reference/*
 *.sql
 *DS_Store

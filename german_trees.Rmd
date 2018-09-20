@@ -1,8 +1,13 @@
 ---
 title: "ML Course Model Training"
-output: 
-  html_notebook: 
+output:
+  html_notebook:
     theme: journal
+    toc: yes
+    toc_depth: 2
+  pdf_document:
+    keep_tex: yes
+    number_sections: yes
     toc: yes
     toc_depth: 2
 ---

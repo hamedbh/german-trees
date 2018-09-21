@@ -544,7 +544,7 @@ xgb_roc <- roc(as.numeric(test_df$outcome), as.numeric(xgb_factor_preds))
 auc(xgb_roc)
 ```
 
-AUC of 0.7952 is a good result.
+AUC of `r round(as.numeric(auc(xgb_roc)), 3)` is a good result.
 
 [1]: https://archive.ics.uci.edu/ml/index.php
 [2]: https://xgboost.ai/

@@ -31,7 +31,8 @@ suppressPackageStartupMessages({
     library(ggplot2) # data viz
     library(viridis) # colour palettes for plots
     library(stringi) # string manipulation
-    library(pROC) # handling ROC curves
+    library(pROC) # handling ROC objects
+	library(plotROC) # plotting ROC curves nicely in ggplot2
     library(forcats) # managing factors/categorical variables
     library(knitr) # pretty printing of tables with kable()
     library(rBayesianOptimization)
@@ -444,7 +445,6 @@ if (file.exists("./data/xgb_opt_res.rds")) {
     write_rds(xgb_opt_res, "./data/xgb_opt_res.rds")
 }
 xgb_opt_res$Best_Par
-xgb_opt_res$History
 ```
 
 Now run the cross-validation again with the best parameters found, to have the evaluation log.
@@ -514,14 +514,25 @@ var_importance <- xgb.importance(model = xgb_model)
 xgb.plot.importance(var_importance)
 ```
 
-Now I need to set the prediction threshold on the test set.
+Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve
 
 ```{r}
 xgb_preds <- predict(xgb_model, dtest)
-thresholds <- seq(0.01, 0.99, 0.01)
+tibble(test_labels, xgb_preds) %>% 
+	ggplot(aes(d = test_labels, m = xgb_preds)) + 
+	geom_roc() + 
+	labs(x = "False Positive Rate", y = "True Positive Rate") + 
+	geom_abline(slope = 1, intercept = 0, alpha = 0.5, col = "blue") +
+	theme_minimal()
+```
+
+Then iterate over the possible thresholds, and get the one that maximises AUC.
+
+```{r}
+thresholds <- seq(0, 1, 0.001)
 auc_scores <- map_dbl(thresholds, 
                       function(x) {
-                          tmp_preds <- as.integer(predict(xgb_model, dtest) > x)
+                          tmp_preds <- as.integer(xgb_preds > x)
                           auc(roc(test_labels, tmp_preds))
                       })
 
@@ -540,7 +551,7 @@ print_conf_matrix(xgb_conf_mat)
 ```
 
 ```{r}
-xgb_roc <- roc(as.numeric(test_df$outcome), as.numeric(xgb_factor_preds))
+xgb_roc <- roc(test_labels, as.numeric(xgb_factor_preds))
 auc(xgb_roc)
 ```
 

@@ -35,6 +35,7 @@ suppressPackageStartupMessages({
 	library(plotROC) # plotting ROC curves nicely in ggplot2
     library(forcats) # managing factors/categorical variables
     library(knitr) # pretty printing of tables with kable()
+	library(rattle) # pretty printing of decision tree
     library(rBayesianOptimization)
     source("./R/print_conf_matrix.R")
 })
@@ -296,13 +297,71 @@ summary(amount_model$residuals)
 summary(duration_model$residuals)
 ```
 
-There is not much difference between them: if I were using a method such as logistic regression for the full model I would need to pick one, but I can afford to put both variables into a tree-based model, starting with a random forest.
+There is not much difference between them: if I were using a method such as logistic regression for the full model I would need to pick one, but I can afford to put both variables into a tree-based model, starting with a simple decision tree.
+
+# Simple Decision Tree
+
+Start off with a simple decision tree via `rpart`, which I control through `caret::train()`.
+
+NB. Here and when validating/training the Random Forest and XGBoost models I write the model objects to disk as `.rds` files, and read those in if possible. This is simply to save time retraining models when running the notebook again. If you want to force the model to train again simply delete the relevant `.rds` file from the `data` directory.
+
+```{r}
+rpart_trcontrol <- trainControl(method = "repeatedcv", 
+								number = 5L, 
+								repeats = 3L, 
+								summaryFunction = twoClassSummary, 
+								classProbs = TRUE, 
+								savePredictions = "final")
+
+if (file.exists("./data/rpart_model.rds")) {
+	rpart_model <- read_rds("./data/rpart_model.rds")
+} else {
+	rpart_model <- rpart_model <- train(outcome ~ ., 
+										data = train_df, 
+										method = "rpart", 
+										metric = "ROC", 
+										tuneLength = 30, 
+										trControl = rpart_trcontrol)
+	
+	write_rds(rpart_model, "./data/rpart_model.rds")
+}
+fancyRpartPlot(rpart_model$finalModel, sub = "German Credit Decision Tree")
+```
+
+Need to set a prediction threshold that we can then use on the test set.
+
+```{r}
+rpart_train_probs <- predict(rpart_model, train_df, type = "prob")[["good"]]
+rpart_train_roc <- roc(train_df$outcome, rpart_train_probs)
+rpart_best_threshold <- round(coords(rpart_train_roc, 
+									 x = "best", 
+									 ret = "threshold", 
+									 best.method = "closest.topleft"), 
+							  2)
+plot(rpart_train_roc, type = "s", print.thres = "best", print.thres.best.method = "closest.topleft", print.auc = TRUE)
+```
+
+How does this perform? Predict classes for the test set and then evaluate using AUC.
+
+```{r}
+rpart_preds <- as.character(
+	predict(rpart_model, 
+			test_df, 
+			type = "prob")[["good"]] > rpart_best_threshold) %>% 
+	fct_recode(good = "TRUE", 
+               bad = "FALSE")
+rpart_conf_mat <- confusionMatrix(rpart_preds, test_df$outcome)
+print_conf_matrix(rpart_conf_mat)
+rpart_roc <- roc(as.numeric(test_df$outcome == "good"), 
+				 as.numeric(rpart_preds == "good"))
+auc(rpart_roc)
+```
+
+The simple decision tree performs quite well, achieving AUC of `r round(as.numeric(rpart_roc$auc), 3)`.
 
 # Random Forest with AUC Objective
 
-I will train the random forest through `caret::train()`, which allows for easy grid search on the `mtry` parameter in cross-validation.
-
-NB. Both here and when validating/training the XGBoost model I write the model objects to disk as `.rds` files, and read those in if possible. This is simply to save time retraining models when running the notebook again. If you want to force the model to train again simply delete the relevant `.rds` file from the `data` directory.
+I now train the random forest, again using `caret::train()` for easy grid search on the `mtry` parameter in cross-validation.
 
 ```{r}
 # set up trainControl object to pass to caret::train()
@@ -315,7 +374,7 @@ rf_trcontrol <- trainControl(method = "repeatedcv",
                              classProbs = TRUE, 
                              savePredictions = "final")
 # set up tuning grid for testing values of mtry
-rf_tunegrid <- expand.grid(.mtry = seq(2, 20, by = 2))
+rf_tunegrid <- expand.grid(.mtry = seq(2, 20, by = 1))
 
 if (file.exists("./data/rf_model.rds")) {
     rf_model <- read_rds("./data/rf_model.rds")
@@ -327,7 +386,7 @@ if (file.exists("./data/rf_model.rds")) {
                       maximize = TRUE, 
                       tuneGrid = rf_tunegrid,
                       nodesize = 20L, 
-                      ntree = 1500L, 
+                      ntree = 1000L, 
                       trControl = rf_trcontrol)
     
     write_rds(rf_model, "./data/rf_model.rds")
@@ -336,28 +395,38 @@ print(rf_model)
 plot(rf_model)
 ```
 
-It seems that `r rf_model[["results"]][["mtry"]][which.max(rf_model[["results"]][["ROC"]])]` is the value for `mtry` that maximises AUC. I can now use `caret::thresholder()` to get the optimum threshold for the predicted probabilities.
+It seems that `r rf_model[["results"]][["mtry"]][which.max(rf_model[["results"]][["ROC"]])]` is the value for `mtry` that maximises AUC. I can now plot the ROC to get the optimum threshold for the predicted probabilities.
 
 ```{r}
-rf_thresholds <- thresholder(rf_model, seq(0.01, 0.99, 0.01))
-rf_best_threshold <- rf_thresholds[["prob_threshold"]][[which.min(rf_thresholds[["Dist"]])]]
-paste0("Threshold that maximises AUC is ", rf_best_threshold)
+rf_train_probs <- predict(rf_model, train_df, type = "prob")[["good"]]
+rf_train_roc <- roc(train_df$outcome, rf_train_probs)
+rf_best_threshold <- round(coords(rf_train_roc, 
+								  x = "best", 
+								  ret = "threshold", 
+								  best.method = "closest.topleft"), 
+						   2)
+plot(rf_train_roc, 
+	 type = "s", 
+	 print.thres = "best", 
+	 print.thres.best.method = "closest.topleft", 
+	 print.auc = TRUE)
+paste0("Threshold that maximises AUC is ", 
+	   rf_best_threshold)
 ```
 
-Now evaluate the model on the test set.
+Now use that threshold to predict on the test set, and evaluate the model.
 
 ```{r}
-rf_preds <- as.character(predict(rf_model, 
-                                 newdata = test_df, 
-                                 type = "prob")[["good"]] > rf_best_threshold) %>% 
-    fct_recode(good = "TRUE", 
+rf_preds <- as.character(
+	predict(rf_model, 
+			test_df, 
+			type = "prob")[["good"]] > rf_best_threshold) %>% 
+	fct_recode(good = "TRUE", 
                bad = "FALSE")
 rf_conf_mat <- confusionMatrix(rf_preds, test_df$outcome)
 print_conf_matrix(rf_conf_mat)
-```
-
-```{r}
-rf_roc <- roc(as.numeric(test_df$outcome), as.numeric(rf_preds))
+rf_roc <- roc(as.numeric(test_df$outcome == "good"), 
+			  as.numeric(rf_preds == "good"))
 auc(rf_roc)
 ```
 
@@ -491,9 +560,8 @@ xgb_cv[["evaluation_log"]] %>%
            test_auc_mean) %>% 
     mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
     ggplot(aes(x = iter, y = auc, colour = partition)) +
-    # facet_wrap(~ cv_count) +
     geom_point() +
-    scale_colour_viridis(discrete = TRUE, option = "A") + 
+    scale_colour_viridis(discrete = TRUE, option = "B") + 
     ylim(0, 1) +
     theme_minimal()
 ```
@@ -514,35 +582,29 @@ var_importance <- xgb.importance(model = xgb_model)
 xgb.plot.importance(var_importance)
 ```
 
-Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve
+Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve.
 
 ```{r}
-xgb_preds <- predict(xgb_model, dtest)
-tibble(test_labels, xgb_preds) %>% 
-	ggplot(aes(d = test_labels, m = xgb_preds)) + 
-	geom_roc() + 
-	labs(x = "False Positive Rate", y = "True Positive Rate") + 
-	geom_abline(slope = 1, intercept = 0, alpha = 0.5, col = "blue") +
-	theme_minimal()
-```
-
-Then iterate over the possible thresholds, and get the one that maximises AUC.
-
-```{r}
-thresholds <- seq(0, 1, 0.001)
-auc_scores <- map_dbl(thresholds, 
-                      function(x) {
-                          tmp_preds <- as.integer(xgb_preds > x)
-                          auc(roc(test_labels, tmp_preds))
-                      })
-
-xgb_best_threshold <- thresholds[[which.max(auc_scores)]]
-paste0("Threshold that maximises AUC is ", xgb_best_threshold)
+xgb_train_probs <- predict(xgb_model, dtrain, type = "prob")
+xgb_train_roc <- roc(train_labels, xgb_train_probs)
+xgb_best_threshold <- round(coords(xgb_train_roc, 
+								  x = "best", 
+								  ret = "threshold", 
+								  best.method = "closest.topleft"), 
+						   2)
+plot(xgb_train_roc, 
+	 type = "s", 
+	 print.thres = "best", 
+	 print.thres.best.method = "closest.topleft", 
+	 print.auc = TRUE)
+paste0("Threshold that maximises AUC is ", 
+	   xgb_best_threshold)
 ```
 
 Now evaluate the model on the test set.
 
 ```{r}
+xgb_preds <- predict(xgb_model, dtest, type = "prob")
 xgb_factor_preds <- as.character(xgb_preds > xgb_best_threshold) %>% 
     fct_recode(good = "TRUE", 
                bad = "FALSE")
@@ -556,6 +618,31 @@ auc(xgb_roc)
 ```
 
 AUC of `r round(as.numeric(auc(xgb_roc)), 3)` is a good result.
+
+# Model Evaluation
+
+We can compare the results from all three models.
+
+```{r}
+tibble(model = c("Decision Tree", 
+				 "Random Forest", 
+				 "XGBoost"), 
+	   AUC = map_dbl(list(rpart_roc, rf_roc, xgb_roc), function(roc_obj) {
+	as.numeric(auc(roc_obj))
+	   }
+	)) %>% 
+	ggplot(aes(x = factor(model), y = AUC, fill = model)) + 
+	geom_col(color = "light grey") + 
+	labs(y = "AUC", x = "") + 
+	scale_fill_viridis(option = "B", discrete = TRUE) + 
+	scale_y_continuous(breaks = seq(from = 0, to = 1, by = 0.2)) +
+	geom_hline(yintercept = 1, col = inferno(9)[5]) + 
+	guides(fill = FALSE) + 
+	theme_minimal() + 
+	theme(axis.text.x = element_text(size = 14))
+```
+
+Gradient-boosted trees via the XGBoost package perform substantially better than the other models.
 
 [1]: https://archive.ics.uci.edu/ml/index.php
 [2]: https://xgboost.ai/

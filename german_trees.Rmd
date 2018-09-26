@@ -12,7 +12,7 @@ output:
     toc_depth: 2
 ---
 
-This is an expanded version of the modelling work done on the course in Bootle. Data are downloaded directly from the [UCI Machine Learning Repository][1]. Models built using [XGBoost][2] and random forests.
+Walkthrough of building classification models using the German Credit Data from the [UCI Machine Learning Repository][1]. Uses decision tree, random forests and [XGBoost][2] for modelling, as well as Bayesian Optimisation of hyperparameters.
 
 # Data Loading and Setup
 

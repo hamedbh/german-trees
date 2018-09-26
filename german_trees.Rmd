@@ -357,7 +357,12 @@ rpart_roc <- roc(as.numeric(test_df$outcome == "good"),
 auc(rpart_roc)
 ```
 
-The simple decision tree performs quite well, achieving AUC of `r round(as.numeric(rpart_roc$auc), 3)`.
+The simple decision tree performs quite well, achieving AUC of `r round(as.numeric(rpart_roc$auc), 3)`. We can check the variable importance plot also.
+
+```{r}
+plot(varImp(rpart_model), top = 10)
+```
+
 
 # Random Forest with AUC Objective
 
@@ -428,6 +433,12 @@ print_conf_matrix(rf_conf_mat)
 rf_roc <- roc(as.numeric(test_df$outcome == "good"), 
 			  as.numeric(rf_preds == "good"))
 auc(rf_roc)
+```
+
+Random Forest achieves better results than decision trees. We can see the relative importance of the features.
+
+```{r}
+plot(varImp(rf_model), top = 10)
 ```
 
 # XGBoost with AUC Objective
@@ -579,7 +590,7 @@ Can visualise the relative importance of the features using functions from `xgbo
 
 ```{r}
 var_importance <- xgb.importance(model = xgb_model)
-xgb.plot.importance(var_importance)
+xgb.plot.importance(var_importance, top = 10)
 ```
 
 Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve.

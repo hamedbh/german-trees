@@ -639,10 +639,10 @@ tibble(model = c("Decision Tree",
 				 "Random Forest", 
 				 "XGBoost"), 
 	   AUC = map_dbl(list(rpart_roc, rf_roc, xgb_roc), function(roc_obj) {
-	as.numeric(auc(roc_obj))
+	   	round(as.numeric(auc(roc_obj)), 2)
 	   }
-	)) %>% 
-	ggplot(aes(x = factor(model), y = AUC, fill = model)) + 
+	   )) %>% 
+	ggplot(aes(x = factor(model), y = AUC, fill = model, label = AUC)) + 
 	geom_col(color = "light grey") + 
 	labs(y = "AUC", x = "") + 
 	scale_fill_viridis(option = "B", discrete = TRUE) + 
@@ -650,7 +650,8 @@ tibble(model = c("Decision Tree",
 	geom_hline(yintercept = 1, col = inferno(9)[5]) + 
 	guides(fill = FALSE) + 
 	theme_minimal() + 
-	theme(axis.text.x = element_text(size = 14))
+	theme(axis.text.x = element_text(size = 14)) + 
+	geom_text(nudge_y = 0.05, size = 5)
 ```
 
 Gradient-boosted trees via the XGBoost package perform substantially better than the other models.

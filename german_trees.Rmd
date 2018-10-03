@@ -654,7 +654,28 @@ tibble(model = c("Decision Tree",
 	geom_text(nudge_y = 0.05, size = 5)
 ```
 
-Gradient-boosted trees via the XGBoost package perform substantially better than the other models.
+Gradient-boosted trees via the XGBoost package perform substantially better than the other models. Whether this makes them the right choice will depend on the trade-off between interpretability and performance.
+
+# Algorithmic bias
+
+This is bias not in the sense meant earlier, i.e. underfitting, but in the sense of prejudice and unfairness. Machines only learn from data within the parameters we set, and can reflect implicit values of the humans that create the algorithms. Recent examples that illustrate this include:
+
+- [Word embeddings reflecting human biases][3];
+- [Software used to predict recidivism][4] discriminating against black people; 
+- [Google Photos classifying black people as gorillas][5].
+
+Reading about algorithmic bias reveals that it can be insidious, and difficult to diagnose. It should be possible though for anyone building any sort of model to consider whether any obvious sources of unfairness are encoded in the model.
+
+Let's consider the list of features in the German Credit dataset.
+
+```{r}
+names(clean_df)
+```
+
+Are any of these potential sources of algorithmic bias?
 
 [1]: https://archive.ics.uci.edu/ml/index.php
 [2]: https://xgboost.ai/
+[3]: http://science.sciencemag.org/content/356/6334/183
+[4]: https://www.propublica.org/article/machine-bias-risk-assessments-in-criminal-sentencing
+[5]: https://www.theverge.com/2018/1/12/16882408/google-racist-gorillas-photo-recognition-algorithm-ai

@@ -861,7 +861,192 @@ xgb_roc2 <- roc(test_labels, as.numeric(xgb_factor_preds2))
 auc(xgb_roc2)
 ```
 
+# XGBoost without gender
 
+```{r}
+# create matrices with Matrix::sparse.model.matrix as before, but with 
+# extra step of dropping age and gender
+train_df3 <- train_df %>% 
+	dplyr::select(-gender)
+test_df3 <- test_df %>% 
+	dplyr::select(-gender)
+train_sparse3 <- sparse.model.matrix(outcome ~ ., data = train_df3)
+test_sparse3 <- sparse.model.matrix(outcome ~ ., data = test_df3)
+
+# xgb performs best with its own object type
+dtrain3 <- xgb.DMatrix(train_sparse3, label = train_labels)
+dtest3 <- xgb.DMatrix(test_sparse3, label = test_labels)
+
+# set seed for reproducibility
+set.seed(1907L)
+
+# define the folds for cross-validation
+cv_folds <- KFold(train_labels, nfolds = 5,
+                  stratified = TRUE, seed = 0)
+
+# create a function that will return values for the optimisation
+xgb_cv_bayes <- function(max_depth, 
+                         min_child_weight, 
+                         subsample, 
+                         eta,
+                         colsample_bytree, 
+                         lambda, 
+                         alpha, 
+                         gamma) {
+    cv <- xgb.cv(params = list(booster = "gbtree", 
+                               eta = eta,
+                               max_depth = max_depth,
+                               min_child_weight = min_child_weight,
+                               subsample = subsample, 
+                               colsample_bytree = colsample_bytree,
+                               lambda = lambda, 
+                               alpha = alpha,
+                               gamma = gamma, 
+                               objective = "binary:logistic",
+                               eval_metric = "auc"),
+                 data = dtrain3, 
+                 nrounds = 10000L,
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 100L, 
+                 maximize = TRUE, 
+                 verbose = 0)
+    list(Score = cv$evaluation_log$test_auc_mean[cv$best_iteration],
+         Pred = cv$pred)
+}
+
+# run optimisation with bounds for the parameters to be tested
+if (file.exists("./data/xgb_opt_res3.rds")) {
+    xgb_opt_res3 <- read_rds("./data/xgb_opt_res3.rds")
+} else {
+    xgb_opt_res3 <- BayesianOptimization(xgb_cv_bayes,
+                                        bounds = list(
+                                            max_depth = c(1L, 15L),
+                                            min_child_weight = c(1L, 20L), 
+                                            subsample = c(0.2, 1.0), 
+                                            eta = c(0.0001, 0.1), 
+                                            colsample_bytree = c(0.2, 1), 
+                                            lambda = c(0.5, 20.0), 
+                                            alpha = c(0.5, 20.0), 
+                                            gamma = c(0.0, 20.0)),
+                                        init_grid_dt = NULL, 
+                                        init_points = 10, 
+                                        # number of random points used to 
+                                        # initialise the process. Must be at 
+                                        # least 1 or will fail
+                                        n_iter = 50, # this is a lot of rounds 
+                                        # and will take quite some time to run. 
+                                        # Can get good results n_iter = 20.
+                                        acq = "ucb", 
+                                        kappa = 2.576, 
+                                        eps = 0.0,
+                                        verbose = TRUE)
+    write_rds(xgb_opt_res3, "./data/xgb_opt_res3.rds")
+}
+xgb_opt_res3$Best_Par
+```
+
+Now run the cross-validation again with the best parameters found, to have the evaluation log.
+
+```{r}
+xgb_params3 <- xgb_opt_res3[["Best_Par"]]
+xgb_param_list3 <- list(
+    eta = xgb_params3[["eta"]], 
+    max_depth = xgb_params3[["max_depth"]], 
+    min_child_weight = xgb_params3[["min_child_weight"]], 
+    subsample = xgb_params3[["subsample"]], 
+    colsample_bytree = xgb_params3[["colsample_bytree"]], 
+    lambda = xgb_params3[["lambda"]], 
+    alpha = xgb_params3[["alpha"]], 
+    gamma = xgb_params3[["gamma"]], 
+    objective = "binary:logistic", 
+    eval_metric = "auc")
+
+if (file.exists("./data/xgb_cv3.rds")) {
+    xgb_cv3 <- read_rds("./data/xgb_cv3.rds")
+} else {
+    xgb_cv3 <- xgb.cv(params = xgb_param_list3, 
+                     data = dtrain3, 
+                     nrounds = 10000L,
+                     folds = cv_folds, 
+                     prediction = TRUE, 
+                     showsd = TRUE,
+                     early_stopping_rounds = 1000L, 
+                     print_every_n = 500L, 
+                     maximize = TRUE)
+    
+    write_rds(xgb_cv3, "./data/xgb_cv3.rds")
+}
+```
+
+Now I will plot the training progress for cross-validation to detect bias or variance.
+
+```{r}
+xgb_cv3[["evaluation_log"]] %>% 
+    dplyr::select(iter, train_auc_mean, test_auc_mean) %>% 
+    gather(key = "partition", 
+           value = "auc", 
+           train_auc_mean, 
+           test_auc_mean) %>% 
+    mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
+    ggplot(aes(x = iter, y = auc, colour = partition)) +
+    geom_point() +
+    scale_colour_viridis(discrete = TRUE, option = "B") + 
+    ylim(0, 1) +
+    theme_minimal()
+```
+
+Now train the XGBoost model.
+
+```{r}
+xgb_model3 <- xgb.train(params = xgb_param_list3, 
+                       data = dtrain3, 
+                       nrounds = xgb_cv3[["best_iteration"]], 
+                       metrics = "auc")
+```
+
+Can visualise the relative importance of the features using functions from `xgboost`.
+
+```{r}
+var_importance <- xgb.importance(model = xgb_model3)
+xgb.plot.importance(var_importance, top = 10)
+```
+
+Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve.
+
+```{r}
+xgb_train_probs3 <- predict(xgb_model3, dtrain3, type = "prob")
+xgb_train_roc3 <- roc(train_labels, xgb_train_probs3)
+xgb_best_threshold3 <- round(coords(xgb_train_roc3, 
+									x = "best", 
+									ret = "threshold", 
+									best.method = "closest.topleft"), 
+							 2)
+plot(xgb_train_roc3, 
+	 type = "s", 
+	 print.thres = "best", 
+	 print.thres.best.method = "closest.topleft", 
+	 print.auc = TRUE)
+paste0("Threshold that maximises AUC is ", 
+	   xgb_best_threshold3)
+```
+
+Now evaluate the model on the test set.
+
+```{r}
+xgb_preds3 <- predict(xgb_model3, dtest3, type = "prob")
+xgb_factor_preds3 <- as.character(xgb_preds3 > xgb_best_threshold3) %>% 
+	fct_recode(good = "TRUE", 
+			   bad = "FALSE")
+xgb_conf_mat3 <- confusionMatrix(xgb_factor_preds3, test_df3$outcome)
+print_conf_matrix(xgb_conf_mat3)
+```
+
+```{r}
+xgb_roc3 <- roc(test_labels, as.numeric(xgb_factor_preds3))
+auc(xgb_roc3)
+```
 
 [1]: https://archive.ics.uci.edu/ml/index.php
 [2]: https://xgboost.ai/

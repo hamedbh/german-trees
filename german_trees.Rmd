@@ -1048,6 +1048,38 @@ xgb_roc3 <- roc(test_labels, as.numeric(xgb_factor_preds3))
 auc(xgb_roc3)
 ```
 
+# Model Evaluation, Part Two
+
+We can now compare the results from all five models.
+
+```{r}
+tibble(model = c("Decision Tree", 
+				 "Random Forest", 
+				 "XGBoost, Full", 
+				 "XGBoost, no Age/Gender", 
+				 "XGBoost, no Gender"), 
+	   AUC = map_dbl(list(rpart_roc,
+	   				      rf_roc,
+	   				      xgb_roc, 
+	   				      xgb_roc2, 
+	   				      xgb_roc3), function(roc_obj) {
+	   				      	  round(as.numeric(auc(roc_obj)), 2)
+	   }
+	   )) %>% 
+	ggplot(aes(x = factor(model), y = AUC, fill = model, label = AUC)) + 
+	geom_col(color = "light grey") + 
+	labs(y = "AUC", x = "") + 
+	scale_fill_viridis(option = "B", discrete = TRUE) + 
+	scale_y_continuous(breaks = seq(from = 0, to = 1, by = 0.2)) +
+	geom_hline(yintercept = 1, col = inferno(9)[5]) + 
+	guides(fill = FALSE) + 
+	theme_minimal() + 
+	theme(axis.text.x = element_text(size = 8)) + 
+	geom_text(nudge_y = 0.05, size = 5)
+```
+
+The XGBoost model with all features does perform better than either of the models excluding `age` and/or `gender`, but both of those models still perform substantially better than random forest or decision tree. As mentioned above, algorithmic bias is a complex topic that deserves in-depth treatment, but these results certainly indicate that it is possible to produce high-performing models without considering protected characteristics.
+
 [1]: https://archive.ics.uci.edu/ml/index.php
 [2]: https://xgboost.ai/
 [3]: http://science.sciencemag.org/content/356/6334/183

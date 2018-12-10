@@ -1080,6 +1080,34 @@ tibble(model = c("Decision Tree",
 
 The XGBoost model with all features does perform better than either of the models excluding `age` and/or `gender`, but both of those models still perform substantially better than random forest or decision tree. As mentioned above, algorithmic bias is a complex topic that deserves in-depth treatment, but these results certainly indicate that it is possible to produce high-performing models without considering protected characteristics.
 
+# Lift Chart
+
+Can also use Lift Charts (also called Gains Charts) to illustrate model performance. So instead of setting a decision threshold, can look at how well-ordered the predictions are (from modt to least likely). How quickly does each model find positive results?
+
+```{r}
+# create a basic decision tree to use as a baseline
+basic_rpart <- rpart::rpart(outcome ~ ., train_df, 
+                            control = list(maxdepth = 2))
+lift_data <- tibble(xgb1 = xgb_preds, 
+                    xgb2 = xgb_preds2, 
+                    xgb3 = xgb_preds3, 
+                    rf = predict(rf_model, 
+                                 test_df, 
+                                 type = "prob")[, "good"], 
+                    rpart_full = predict(rpart_model, 
+                                    test_df, 
+                                    type = "prob")[, "good"], 
+                    rpart_basic = predict(basic_rpart, 
+                                          test_df, 
+                                          type = "prob")[, "good"], 
+                    outcome = test_df$outcome)
+caret::lift(outcome ~ xgb1 + xgb2 + xgb3 + rf + rpart_full + rpart_basic, 
+            data = lift_data, 
+            class = "good") %>% 
+    ggplot()
+```
+
+
 [1]: https://archive.ics.uci.edu/ml/index.php
 [2]: https://xgboost.ai/
 [3]: http://science.sciencemag.org/content/356/6334/183

@@ -2,7 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
-*.nb.html
+*.html
 *.pdf
 reference/*
 *.sql

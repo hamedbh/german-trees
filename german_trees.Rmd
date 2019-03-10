@@ -1,10 +1,13 @@
 ---
 title: "German Trees"
 output:
-  html_notebook:
+  html_document: 
+    highlight: kate
+    number_sections: yes
     theme: journal
     toc: yes
     toc_depth: 2
+    toc_float: yes
   pdf_document:
     keep_tex: yes
     number_sections: yes

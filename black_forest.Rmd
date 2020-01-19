@@ -1,0 +1,967 @@
+---
+title: "Black Forest"
+output:
+  html_document: 
+    highlight: kate
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+  pdf_document:
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+---
+
+Follow-on from the German Trees notebook, which worked through building classification models using the German Credit Data from the [UCI Machine Learning Repository][1] with decision trees, random forests and [XGBoost][2] for modelling, as well as Bayesian Optimisation of hyperparameters. This notebook spends less time on the early steps, misses out random forests entirely, and includes regularised logistic regression methods via `glmnet` and GAMs via `mgcv` to compare results from interpretable methods.
+
+# Data Loading and Setup
+
+```{r load libraries}
+# load libraries for the work, comments indicate what each is for
+# set a switch that can suppress the startup messages if preferred
+show_package_warnings <- TRUE
+pkg_list <- c("ggcorrplot", 
+              "xgboost", 
+              "Matrix", 
+              "viridis", 
+              "stringi", 
+              "knitr", 
+              "rattle", 
+              "rBayesianOptimization", 
+              "glmnet", 
+              "mgcv", 
+              "data.table", 
+              "pROC", 
+              "plotROC", 
+              "tidyverse", 
+              "caret")
+if (show_package_warnings) {
+    for (pkg in pkg_list) {
+        library(pkg, 
+                character.only = TRUE)
+    }
+} else {
+    for (pkg in pkg_list) {
+        suppressPackageStartupMessages({
+            library(pkg, 
+                    character.only = TRUE)
+        }) 
+    }
+}
+
+source("./R/print_conf_matrix.R")
+```
+
+Now get the data files from UCI, unless they are already present in the `./data/` directory.
+
+```{r reading data}
+# url for the main dataset
+data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data"
+# the data dictionary
+data_dict_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.doc"
+
+# local filepaths
+data_path <- paste0("./data/", basename(data_url))
+dict_path <- paste0("./data/", basename(data_dict_url))
+
+# download files if not already present
+if (!file.exists(data_path)) {
+    download.file(data_url, data_path)
+}
+if (!file.exists(dict_path)) {
+    download.file(data_dict_url, dict_path)
+}
+
+# column names taken from the data dictionary, slightly changed to keep lengths 
+# reasonable
+column_names <- c("acct_status", "duration", "credit_history", 
+                  "purpose", "amount", "savings_acct", 
+                  "present_emp_since", "pct_of_income", "sex_status", 
+                  "other_debtor_guarantor", "resident_since", "property", 
+                  "age", "other_debts", "housing", 
+                  "num_existing_credits", "job", "num_dependents", 
+                  "telephone", "foreign_worker", "outcome")
+# set the column types manually to avoid any coercion errors
+column_types <- c("ciccicciccicicciciccc")
+
+raw_df <- read_delim(data_path, 
+                     delim = " ", 
+                     col_names = column_names, 
+                     col_types = column_types)
+```
+
+`readr::read_delim()` does not convert strings to factors automatically, so we use `forcats` to set factor levels manually: allows for greater control over the levels and means I can give them more informative names from the start. 
+
+```{r}
+# details of the factors are taken from the data dictionary
+# Can ignore warnings, which are because there are no rows with the given 
+# Axx code
+clean_df <- raw_df %>% 
+    mutate(acct_status = fct_recode(acct_status, 
+                                    overdrawn = "A11", below_200DM = "A12", 
+                                    over_200DM = "A13", no_acct = "A14"), 
+           credit_history = fct_recode(credit_history, 
+                                       none_taken_all_paid = "A30", 
+                                       all_paid_this_bank = "A31", 
+                                       all_paid_duly = "A32", 
+                                       past_delays = "A33", 
+                                       critical_acct = "A34"), 
+           purpose = fct_recode(purpose, 
+                                car_new = "A40", car_used = "A41", 
+                                furniture_equipment  = "A42", 
+                                radio_tv = "A43",  
+                                dom_appliance = "A44", 
+                                repairs = "A45", 
+                                education = "A46", 
+                                vacation = "A47", 
+                                retraining = "A48", 
+                                business = "A49",  
+                                others = "A410"), 
+           savings_acct = fct_recode(savings_acct, 
+                                     to_100DM = "A61", 
+                                     to_500DM = "A62", 
+                                     to_1000DM = "A63", 
+                                     over_1000DM = "A64", 
+                                     unknwn_no_acct = "A65"),
+           present_emp_since = fct_recode(present_emp_since, 
+                                          unemployed = "A71", 
+                                          to_1_yr = "A72", 
+                                          to_4_yrs = "A73", 
+                                          to_7_yrs = "A74", 
+                                          over_7_yrs = "A75"), 
+           sex_status = fct_recode(sex_status, 
+                                   male_divorced = "A91", 
+                                   female_married = "A92", 
+                                   male_single = "A93",  
+                                   male_married = "A94", 
+                                   female_single = "A95"), 
+           other_debtor_guarantor = fct_recode(other_debtor_guarantor, 
+                                               none = "A101",  
+                                               co_applicant = "A102", 
+                                               guarantor = "A103"), 
+           property = fct_recode(property, 
+                                 real_estate = "A121", 
+                                 savings_insurance = "A122", 
+                                 car_other = "A123", 
+                                 unknwn_none = "A124"), 
+           other_debts = fct_recode(other_debts, 
+                                    bank = "A141", 
+                                    stores = "A142", 
+                                    none = "A143"), 
+           housing = fct_recode(housing, 
+                                rent = "A151", 
+                                own = "A152", 
+                                for_free = "A153"), 
+           job = fct_recode(job, 
+                            unemp_unskilled_nonres = "A171", 
+                            unskilled_res = "A172",  
+                            skilled_official = "A173", 
+                            mgmt_highqual = "A174"), 
+           telephone = fct_recode(telephone, 
+                                  no = "A191", 
+                                  yes = "A192"), 
+           foreign_worker = fct_recode(foreign_worker, 
+                                       yes = "A201", 
+                                       no = "A202"), 
+           outcome = fct_recode(outcome, 
+                                good = "1", 
+                                bad = "2")) %>% 
+    # add another factor for gender, a simplification of sex_status, which can 
+    # then be compared during EDA
+    mutate(gender = fct_collapse(sex_status, 
+                                 male = "male_divorced", 
+                                 male = "male_single", 
+                                 male = "male_married", 
+                                 female = "female_married", 
+                                 female = "female_single"))
+
+glimpse(clean_df)
+```
+
+# Exploratory Data Analysis
+
+There was quite a bit of EDA in the German Trees notebook, which we can skip for the most part here. In short:
+
+- `foreign_worker` is nearly homogeneous, should exclude for non-tree models; 
+- Some small classes in `purpose`, need to collapse the small ones;
+- `sex_status` is no better than the `gender` category, so just keep the latter.
+
+```{r}
+clean_df_02 <- clean_df %>% 
+    mutate(purpose_simple = fct_lump(purpose, 
+                                     prop = 0.1)) %>% 
+    select(-sex_status, -purpose)
+# which purpose levels have been lumped together into Other?
+setdiff(levels(clean_df$purpose), 
+        levels(clean_df_02$purpose_simple))
+```
+
+# Correlation Analysis
+
+This is the point at which I'll partition the data, before examining correlations between continuous variables.
+
+```{r}
+# set a seed to make analysis reproducible
+set.seed(1618L)
+# caret::createDataPartition() will ensure that the overall proportions are 
+# reflected in each partition
+in_train <- createDataPartition(clean_df_02[["outcome"]], 
+                                p = 0.8, 
+                                list = FALSE)
+train_df <- clean_df_02[in_train, ]
+test_df <- clean_df_02[-in_train, ]
+```
+
+Now examine correlations between continuous variables.
+
+```{r}
+corr_matrix <- train_df %>% 
+    select_if(is.integer) %>% 
+    data.matrix() %>% 
+    cor()
+
+ggcorrplot(corr_matrix, 
+           hc.order = TRUE, 
+           ggtheme = theme_dark())
+```
+
+The correlation between `amount` and `duration` seems high, and worth examining further.
+
+```{r}
+cor(train_df$amount, train_df$duration) %>% 
+    round(digits = 2)
+```
+
+A correlation value of `r round(cor(train_df$amount, train_df$duration), 2)` is a little high, but not so much that we must pick one over the other. For the tree methods this should be even less of a problem. It's something to pay attention to with LASSO, GAM etc.
+
+# Simple Decision Tree
+
+Start off with a simple decision tree via `rpart`, which I control through `caret::train()`.
+
+NB. Here and when validating/training the Random Forest and XGBoost models I write the model objects to disk as `.rds` files, and read those in if possible. This is simply to save time retraining models when running the notebook again. If you want to force the model to train again simply delete the relevant `.rds` file from the `data` directory.
+
+```{r}
+rpart_trcontrol <- trainControl(method = "repeatedcv", 
+								number = 5L, 
+								repeats = 3L, 
+								summaryFunction = twoClassSummary, 
+								classProbs = TRUE, 
+								savePredictions = "final")
+
+if (file.exists("./bfmodels/rpart_model.rds")) {
+	rpart_model <- read_rds("./bfmodels/rpart_model.rds")
+} else {
+	rpart_model <- rpart_model <- train(outcome ~ ., 
+										data = train_df, 
+										method = "rpart", 
+										metric = "ROC", 
+										tuneLength = 30, 
+										trControl = rpart_trcontrol)
+	
+	write_rds(rpart_model, "./bfmodels/rpart_model.rds")
+}
+fancyRpartPlot(rpart_model$finalModel, sub = "German Credit Decision Tree")
+```
+
+Need to set a prediction threshold that we can then use on the test set.
+
+```{r}
+rpart_train_probs <- predict(rpart_model, train_df, type = "prob")[["good"]]
+rpart_train_roc <- roc(train_df$outcome, rpart_train_probs)
+rpart_best_threshold <- round(coords(rpart_train_roc, 
+									 x = "best", 
+									 ret = "threshold", 
+									 best.method = "closest.topleft"), 
+							  2)
+plot(rpart_train_roc, type = "s", print.thres = "best", print.thres.best.method = "closest.topleft", print.auc = TRUE)
+```
+
+How does this perform? Predict classes for the test set and then evaluate using AUC.
+
+```{r}
+rpart_preds <- as.character(
+	predict(rpart_model, 
+			test_df, 
+			type = "prob")[["good"]] > rpart_best_threshold) %>% 
+	fct_recode(good = "TRUE", 
+               bad = "FALSE")
+rpart_conf_mat <- confusionMatrix(rpart_preds, test_df$outcome)
+print_conf_matrix(rpart_conf_mat)
+rpart_roc <- roc(as.numeric(test_df$outcome == "good"), 
+				 as.numeric(rpart_preds == "good"))
+auc(rpart_roc)
+```
+
+The simple decision tree performs OK but not brilliantly. We can check the variable importance plot also.
+
+```{r}
+plot(varImp(rpart_model), top = 10)
+```
+
+# XGBoost with AUC Objective
+
+Now to XGBoost. There are many hyperparameters to tune, and using grid search through these would not be possible in a reasonable time. Instead I will use Bayesian Optimisation via the `rBayesianOptimization` package.
+
+```{r}
+# create matrices with Matrix::sparse.model.matrix 
+train_sparse <- sparse.model.matrix(outcome ~ ., data = train_df)
+test_sparse <- sparse.model.matrix(outcome ~ ., data = test_df)
+# xgboost needs binary numeric labels
+train_labels <- if_else(train_df$outcome == "good", 1L, 0L)
+test_labels <- if_else(test_df$outcome == "good", 1L, 0L)
+
+# xgb performs best with its own object type
+dtrain <- xgb.DMatrix(train_sparse, label = train_labels)
+dtest <- xgb.DMatrix(test_sparse, label = test_labels)
+
+# set seed for reproducibility
+set.seed(1907L)
+
+# define the folds for cross-validation
+cv_folds <- KFold(train_labels, nfolds = 5,
+                  stratified = TRUE, seed = 0)
+
+# create a function that will return values for the optimisation
+xgb_cv_bayes <- function(max_depth, 
+                         min_child_weight, 
+                         subsample, 
+                         colsample_bytree, 
+                         lambda, 
+                         alpha, 
+                         gamma) {
+    cv <- xgb.cv(params = list(booster = "gbtree", 
+                               eta = 0.01,
+                               max_depth = max_depth,
+                               min_child_weight = min_child_weight,
+                               subsample = subsample, 
+                               colsample_bytree = colsample_bytree,
+                               lambda = lambda, 
+                               alpha = alpha,
+                               gamma = gamma, 
+                               objective = "binary:logistic",
+                               eval_metric = "auc"),
+                 data = dtrain, 
+                 nrounds = 1000L,
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 100L, 
+                 maximize = TRUE, 
+                 verbose = 0)
+    list(Score = cv$evaluation_log$test_auc_mean[cv$best_iteration],
+         Pred = cv$pred)
+}
+
+# run optimisation with bounds for the parameters to be tested
+if (file.exists("./bfmodels/xgb_opt_res.rds")) {
+    xgb_opt_res <- read_rds("./bfmodels/xgb_opt_res.rds")
+} else {
+    xgb_opt_res <- BayesianOptimization(xgb_cv_bayes,
+                                        bounds = list(
+                                            max_depth = c(1L, 15L),
+                                            min_child_weight = c(1L, 20L), 
+                                            subsample = c(0.2, 1.0), 
+                                            colsample_bytree = c(0.2, 1), 
+                                            lambda = c(0.5, 20.0), 
+                                            alpha = c(0.5, 20.0), 
+                                            gamma = c(0.0, 20.0)),
+                                        init_grid_dt = NULL, 
+                                        init_points = 10, 
+                                        # number of random points used to 
+                                        # initialise the process. Must be at 
+                                        # least 1 or will fail
+                                        n_iter = 50, # this is a lot of rounds 
+                                        # and will take quite some time to run. 
+                                        # Can get good results n_iter = 20.
+                                        acq = "ucb", 
+                                        kappa = 2.576, 
+                                        eps = 0.0,
+                                        verbose = TRUE)
+    write_rds(xgb_opt_res, "./bfmodels/xgb_opt_res.rds")
+}
+xgb_opt_res$Best_Par
+```
+
+Now run the cross-validation again with the best parameters found, `eta` reduced by a factor of 100 and `nrounds` increased by the same.
+
+```{r}
+xgb_params <- xgb_opt_res[["Best_Par"]]
+xgb_param_list <- xgb_params %>% 
+    as.list() %>% 
+    c(list(objective = "binary:logistic", 
+           eval_metric = "auc"))
+if (file.exists("./bfmodels/xgb_cv.rds")) {
+    xgb_cv <- read_rds("./bfmodels/xgb_cv.rds")
+} else {
+    xgb_cv <- xgb.cv(params = xgb_param_list, 
+                     data = dtrain, 
+                     eta = 0.0001, 
+                     nrounds = 100000L,
+                     folds = cv_folds, 
+                     prediction = TRUE, 
+                     showsd = TRUE,
+                     early_stopping_rounds = 1000L, 
+                     print_every_n = 1000L, 
+                     maximize = TRUE)
+    
+    write_rds(xgb_cv, "./bfmodels/xgb_cv.rds")
+}
+```
+
+Now I will plot the training progress for cross-validation to detect bias or variance.
+
+```{r}
+xgb_cv[["evaluation_log"]] %>% 
+    dplyr::select(iter, train_auc_mean, test_auc_mean) %>% 
+    gather(key = "partition", 
+           value = "auc", 
+           train_auc_mean, 
+           test_auc_mean) %>% 
+    mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
+    ggplot(aes(x = iter, y = auc, colour = partition)) +
+    geom_point() +
+    scale_colour_viridis(discrete = TRUE, option = "B") + 
+    ylim(0, 1) +
+    theme_minimal()
+```
+
+Now train the XGBoost model.
+
+```{r}
+xgb_model <- xgb.train(params = xgb_param_list, 
+                       data = dtrain, 
+                       nrounds = xgb_cv[["best_iteration"]], 
+                       metrics = "auc")
+```
+
+Can visualise the relative importance of the features using functions from `xgboost`.
+
+```{r}
+var_importance <- xgb.importance(model = xgb_model)
+xgb.plot.importance(var_importance, top = 10)
+```
+
+Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve.
+
+```{r}
+xgb_train_probs <- predict(xgb_model, dtrain, type = "prob")
+xgb_train_roc <- roc(train_labels, xgb_train_probs)
+xgb_best_threshold <- round(coords(xgb_train_roc, 
+								  x = "best", 
+								  ret = "threshold", 
+								  best.method = "closest.topleft"), 
+						   2)
+plot(xgb_train_roc, 
+	 type = "s", 
+	 print.thres = "best", 
+	 print.thres.best.method = "closest.topleft", 
+	 print.auc = TRUE)
+paste0("Threshold that maximises AUC is ", 
+	   xgb_best_threshold)
+```
+
+Now evaluate the model on the test set.
+
+```{r}
+xgb_preds <- predict(xgb_model, dtest, type = "prob")
+xgb_factor_preds <- as.character(xgb_preds > 0.5) %>% 
+    fct_recode(good = "TRUE", 
+               bad = "FALSE")
+xgb_conf_mat <- confusionMatrix(xgb_factor_preds, test_df$outcome)
+print_conf_matrix(xgb_conf_mat)
+```
+
+```{r}
+xgb_roc <- roc(test_labels, as.numeric(xgb_factor_preds))
+auc(xgb_roc)
+```
+
+AUC of `r round(as.numeric(auc(xgb_roc)), 3)` is a good result.
+
+# Model Evaluation
+
+We can compare the results from all three models.
+
+```{r}
+tibble(model = c("Decision Tree", 
+				 "Random Forest", 
+				 "XGBoost"), 
+	   AUC = map_dbl(list(rpart_roc, rf_roc, xgb_roc), function(roc_obj) {
+	   	round(as.numeric(auc(roc_obj)), 2)
+	   }
+	   )) %>% 
+	ggplot(aes(x = factor(model), y = AUC, fill = model, label = AUC)) + 
+	geom_col(color = "light grey") + 
+	labs(y = "AUC", x = "") + 
+	scale_fill_viridis(option = "B", discrete = TRUE) + 
+	scale_y_continuous(breaks = seq(from = 0, to = 1, by = 0.2)) +
+	geom_hline(yintercept = 1, col = inferno(9)[5]) + 
+	guides(fill = FALSE) + 
+	theme_minimal() + 
+	theme(axis.text.x = element_text(size = 14)) + 
+	geom_text(nudge_y = 0.05, size = 5)
+```
+
+Gradient-boosted trees via the XGBoost package perform substantially better than the other models. Whether this makes them the right choice will depend on the trade-off between interpretability and performance.
+
+# Algorithmic bias
+
+This is bias not in the sense meant earlier, i.e. underfitting, but in the sense of prejudice and unfairness. Machines only learn from data within the parameters we set, and can reflect implicit values of the humans that create the algorithms. Recent examples that illustrate this include:
+
+- [Word embeddings reflecting human biases][3];
+- [Software used to predict recidivism][4] discriminating against black people; 
+- [Google Photos classifying black people as gorillas][5].
+
+Reading about algorithmic bias reveals that it can be insidious, and difficult to diagnose. It should be possible though for anyone building any sort of model to consider whether any obvious sources of unfairness are encoded in the model.
+
+Let's consider the list of features in the German Credit dataset.
+
+```{r}
+names(clean_df)
+```
+
+Are any of these potential sources of algorithmic bias? `age` and `gender` are both in the feature set, both of which are protected characteristics under the [Equality Act 2010][6]. Is it legitimate to include these in the model? Legal decisions about the exact situations in which this would be allowed is _far_ beyond the scope of this work. Instead we can look at a different question: do those features make any difference to the model? If they don't then we can ignore the question of whether using them is allowed, and discard them.
+
+# XGBoost without age, gender
+
+```{r}
+# create matrices with Matrix::sparse.model.matrix as before, but with 
+# extra step of dropping age and gender
+train_df2 <- train_df %>% 
+	dplyr::select(-age, -gender)
+test_df2 <- test_df %>% 
+	dplyr::select(-age, -gender)
+train_sparse2 <- sparse.model.matrix(outcome ~ ., data = train_df2)
+test_sparse2 <- sparse.model.matrix(outcome ~ ., data = test_df2)
+
+# xgb performs best with its own object type
+dtrain2 <- xgb.DMatrix(train_sparse2, label = train_labels)
+dtest2 <- xgb.DMatrix(test_sparse2, label = test_labels)
+
+# set seed for reproducibility
+set.seed(1907L)
+
+# define the folds for cross-validation
+cv_folds <- KFold(train_labels, nfolds = 5,
+                  stratified = TRUE, seed = 0)
+
+# create a function that will return values for the optimisation
+xgb_cv_bayes <- function(max_depth, 
+                         min_child_weight, 
+                         subsample, 
+                         eta,
+                         colsample_bytree, 
+                         lambda, 
+                         alpha, 
+                         gamma) {
+    cv <- xgb.cv(params = list(booster = "gbtree", 
+                               eta = eta,
+                               max_depth = max_depth,
+                               min_child_weight = min_child_weight,
+                               subsample = subsample, 
+                               colsample_bytree = colsample_bytree,
+                               lambda = lambda, 
+                               alpha = alpha,
+                               gamma = gamma, 
+                               objective = "binary:logistic",
+                               eval_metric = "auc"),
+                 data = dtrain2, 
+                 nrounds = 10000L,
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 100L, 
+                 maximize = TRUE, 
+                 verbose = 0)
+    list(Score = cv$evaluation_log$test_auc_mean[cv$best_iteration],
+         Pred = cv$pred)
+}
+
+# run optimisation with bounds for the parameters to be tested
+if (file.exists("./data/xgb_opt_res2.rds")) {
+    xgb_opt_res2 <- read_rds("./data/xgb_opt_res2.rds")
+} else {
+    xgb_opt_res2 <- BayesianOptimization(xgb_cv_bayes,
+                                        bounds = list(
+                                            max_depth = c(1L, 15L),
+                                            min_child_weight = c(1L, 20L), 
+                                            subsample = c(0.2, 1.0), 
+                                            eta = c(0.0001, 0.1), 
+                                            colsample_bytree = c(0.2, 1), 
+                                            lambda = c(0.5, 20.0), 
+                                            alpha = c(0.5, 20.0), 
+                                            gamma = c(0.0, 20.0)),
+                                        init_grid_dt = NULL, 
+                                        init_points = 10, 
+                                        # number of random points used to 
+                                        # initialise the process. Must be at 
+                                        # least 1 or will fail
+                                        n_iter = 50, # this is a lot of rounds 
+                                        # and will take quite some time to run. 
+                                        # Can get good results n_iter = 20.
+                                        acq = "ucb", 
+                                        kappa = 2.576, 
+                                        eps = 0.0,
+                                        verbose = TRUE)
+    write_rds(xgb_opt_res2, "./data/xgb_opt_res2.rds")
+}
+xgb_opt_res2$Best_Par
+```
+
+Now run the cross-validation again with the best parameters found, to have the evaluation log.
+
+```{r}
+xgb_params2 <- xgb_opt_res2[["Best_Par"]]
+xgb_param_list2 <- list(
+    eta = xgb_params2[["eta"]], 
+    max_depth = xgb_params2[["max_depth"]], 
+    min_child_weight = xgb_params2[["min_child_weight"]], 
+    subsample = xgb_params2[["subsample"]], 
+    colsample_bytree = xgb_params2[["colsample_bytree"]], 
+    lambda = xgb_params2[["lambda"]], 
+    alpha = xgb_params2[["alpha"]], 
+    gamma = xgb_params2[["gamma"]], 
+    objective = "binary:logistic", 
+    eval_metric = "auc")
+
+if (file.exists("./data/xgb_cv2.rds")) {
+    xgb_cv2 <- read_rds("./data/xgb_cv2.rds")
+} else {
+    xgb_cv2 <- xgb.cv(params = xgb_param_list2, 
+                     data = dtrain2, 
+                     nrounds = 10000L,
+                     folds = cv_folds, 
+                     prediction = TRUE, 
+                     showsd = TRUE,
+                     early_stopping_rounds = 1000L, 
+                     print_every_n = 500L, 
+                     maximize = TRUE)
+    
+    write_rds(xgb_cv2, "./data/xgb_cv2.rds")
+}
+```
+
+Now I will plot the training progress for cross-validation to detect bias or variance.
+
+```{r}
+xgb_cv2[["evaluation_log"]] %>% 
+    dplyr::select(iter, train_auc_mean, test_auc_mean) %>% 
+    gather(key = "partition", 
+           value = "auc", 
+           train_auc_mean, 
+           test_auc_mean) %>% 
+    mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
+    ggplot(aes(x = iter, y = auc, colour = partition)) +
+    geom_point() +
+    scale_colour_viridis(discrete = TRUE, option = "B") + 
+    ylim(0, 1) +
+    theme_minimal()
+```
+
+Now train the XGBoost model.
+
+```{r}
+xgb_model2 <- xgb.train(params = xgb_param_list2, 
+                       data = dtrain2, 
+                       nrounds = xgb_cv2[["best_iteration"]], 
+                       metrics = "auc")
+```
+
+Can visualise the relative importance of the features using functions from `xgboost`.
+
+```{r}
+var_importance <- xgb.importance(model = xgb_model2)
+xgb.plot.importance(var_importance, top = 10)
+```
+
+Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve.
+
+```{r}
+xgb_train_probs2 <- predict(xgb_model2, dtrain2, type = "prob")
+xgb_train_roc2 <- roc(train_labels, xgb_train_probs2)
+xgb_best_threshold2 <- round(coords(xgb_train_roc2, 
+									x = "best", 
+									ret = "threshold", 
+									best.method = "closest.topleft"), 
+							 2)
+plot(xgb_train_roc2, 
+	 type = "s", 
+	 print.thres = "best", 
+	 print.thres.best.method = "closest.topleft", 
+	 print.auc = TRUE)
+paste0("Threshold that maximises AUC is ", 
+	   xgb_best_threshold2)
+```
+
+Now evaluate the model on the test set.
+
+```{r}
+xgb_preds2 <- predict(xgb_model2, dtest2, type = "prob")
+xgb_factor_preds2 <- as.character(xgb_preds2 > xgb_best_threshold2) %>% 
+	fct_recode(good = "TRUE", 
+			   bad = "FALSE")
+xgb_conf_mat2 <- confusionMatrix(xgb_factor_preds2, test_df2$outcome)
+print_conf_matrix(xgb_conf_mat2)
+```
+
+```{r}
+xgb_roc2 <- roc(test_labels, as.numeric(xgb_factor_preds2))
+auc(xgb_roc2)
+```
+
+# XGBoost without gender
+
+```{r}
+# create matrices with Matrix::sparse.model.matrix as before, but with 
+# extra step of dropping age and gender
+train_df3 <- train_df %>% 
+	dplyr::select(-gender)
+test_df3 <- test_df %>% 
+	dplyr::select(-gender)
+train_sparse3 <- sparse.model.matrix(outcome ~ ., data = train_df3)
+test_sparse3 <- sparse.model.matrix(outcome ~ ., data = test_df3)
+
+# xgb performs best with its own object type
+dtrain3 <- xgb.DMatrix(train_sparse3, label = train_labels)
+dtest3 <- xgb.DMatrix(test_sparse3, label = test_labels)
+
+# set seed for reproducibility
+set.seed(1907L)
+
+# define the folds for cross-validation
+cv_folds <- KFold(train_labels, nfolds = 5,
+                  stratified = TRUE, seed = 0)
+
+# create a function that will return values for the optimisation
+xgb_cv_bayes <- function(max_depth, 
+                         min_child_weight, 
+                         subsample, 
+                         eta,
+                         colsample_bytree, 
+                         lambda, 
+                         alpha, 
+                         gamma) {
+    cv <- xgb.cv(params = list(booster = "gbtree", 
+                               eta = eta,
+                               max_depth = max_depth,
+                               min_child_weight = min_child_weight,
+                               subsample = subsample, 
+                               colsample_bytree = colsample_bytree,
+                               lambda = lambda, 
+                               alpha = alpha,
+                               gamma = gamma, 
+                               objective = "binary:logistic",
+                               eval_metric = "auc"),
+                 data = dtrain3, 
+                 nrounds = 10000L,
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 100L, 
+                 maximize = TRUE, 
+                 verbose = 0)
+    list(Score = cv$evaluation_log$test_auc_mean[cv$best_iteration],
+         Pred = cv$pred)
+}
+
+# run optimisation with bounds for the parameters to be tested
+if (file.exists("./data/xgb_opt_res3.rds")) {
+    xgb_opt_res3 <- read_rds("./data/xgb_opt_res3.rds")
+} else {
+    xgb_opt_res3 <- BayesianOptimization(xgb_cv_bayes,
+                                        bounds = list(
+                                            max_depth = c(1L, 15L),
+                                            min_child_weight = c(1L, 20L), 
+                                            subsample = c(0.2, 1.0), 
+                                            eta = c(0.0001, 0.1), 
+                                            colsample_bytree = c(0.2, 1), 
+                                            lambda = c(0.5, 20.0), 
+                                            alpha = c(0.5, 20.0), 
+                                            gamma = c(0.0, 20.0)),
+                                        init_grid_dt = NULL, 
+                                        init_points = 10, 
+                                        # number of random points used to 
+                                        # initialise the process. Must be at 
+                                        # least 1 or will fail
+                                        n_iter = 50, # this is a lot of rounds 
+                                        # and will take quite some time to run. 
+                                        # Can get good results n_iter = 20.
+                                        acq = "ucb", 
+                                        kappa = 2.576, 
+                                        eps = 0.0,
+                                        verbose = TRUE)
+    write_rds(xgb_opt_res3, "./data/xgb_opt_res3.rds")
+}
+xgb_opt_res3$Best_Par
+```
+
+Now run the cross-validation again with the best parameters found, to have the evaluation log.
+
+```{r}
+xgb_params3 <- xgb_opt_res3[["Best_Par"]]
+xgb_param_list3 <- list(
+    eta = xgb_params3[["eta"]], 
+    max_depth = xgb_params3[["max_depth"]], 
+    min_child_weight = xgb_params3[["min_child_weight"]], 
+    subsample = xgb_params3[["subsample"]], 
+    colsample_bytree = xgb_params3[["colsample_bytree"]], 
+    lambda = xgb_params3[["lambda"]], 
+    alpha = xgb_params3[["alpha"]], 
+    gamma = xgb_params3[["gamma"]], 
+    objective = "binary:logistic", 
+    eval_metric = "auc")
+
+if (file.exists("./data/xgb_cv3.rds")) {
+    xgb_cv3 <- read_rds("./data/xgb_cv3.rds")
+} else {
+    xgb_cv3 <- xgb.cv(params = xgb_param_list3, 
+                     data = dtrain3, 
+                     nrounds = 10000L,
+                     folds = cv_folds, 
+                     prediction = TRUE, 
+                     showsd = TRUE,
+                     early_stopping_rounds = 1000L, 
+                     print_every_n = 500L, 
+                     maximize = TRUE)
+    
+    write_rds(xgb_cv3, "./data/xgb_cv3.rds")
+}
+```
+
+Now I will plot the training progress for cross-validation to detect bias or variance.
+
+```{r}
+xgb_cv3[["evaluation_log"]] %>% 
+    dplyr::select(iter, train_auc_mean, test_auc_mean) %>% 
+    gather(key = "partition", 
+           value = "auc", 
+           train_auc_mean, 
+           test_auc_mean) %>% 
+    mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
+    ggplot(aes(x = iter, y = auc, colour = partition)) +
+    geom_point() +
+    scale_colour_viridis(discrete = TRUE, option = "B") + 
+    ylim(0, 1) +
+    theme_minimal()
+```
+
+Now train the XGBoost model.
+
+```{r}
+xgb_model3 <- xgb.train(params = xgb_param_list3, 
+                       data = dtrain3, 
+                       nrounds = xgb_cv3[["best_iteration"]], 
+                       metrics = "auc")
+```
+
+Can visualise the relative importance of the features using functions from `xgboost`.
+
+```{r}
+var_importance <- xgb.importance(model = xgb_model3)
+xgb.plot.importance(var_importance, top = 10)
+```
+
+Now I need to set the prediction threshold on the test set. Start by plotting the ROC curve.
+
+```{r}
+xgb_train_probs3 <- predict(xgb_model3, dtrain3, type = "prob")
+xgb_train_roc3 <- roc(train_labels, xgb_train_probs3)
+xgb_best_threshold3 <- round(coords(xgb_train_roc3, 
+									x = "best", 
+									ret = "threshold", 
+									best.method = "closest.topleft"), 
+							 2)
+plot(xgb_train_roc3, 
+	 type = "s", 
+	 print.thres = "best", 
+	 print.thres.best.method = "closest.topleft", 
+	 print.auc = TRUE)
+paste0("Threshold that maximises AUC is ", 
+	   xgb_best_threshold3)
+```
+
+Now evaluate the model on the test set.
+
+```{r}
+xgb_preds3 <- predict(xgb_model3, dtest3, type = "prob")
+xgb_factor_preds3 <- as.character(xgb_preds3 > xgb_best_threshold3) %>% 
+	fct_recode(good = "TRUE", 
+			   bad = "FALSE")
+xgb_conf_mat3 <- confusionMatrix(xgb_factor_preds3, test_df3$outcome)
+print_conf_matrix(xgb_conf_mat3)
+```
+
+```{r}
+xgb_roc3 <- roc(test_labels, as.numeric(xgb_factor_preds3))
+auc(xgb_roc3)
+```
+
+# Model Evaluation, Part Two
+
+We can now compare the results from all five models.
+
+```{r}
+tibble(model = c("Decision Tree", 
+				 "Random Forest", 
+				 "XGBoost, Full", 
+				 "XGBoost, no Age/Gender", 
+				 "XGBoost, no Gender"), 
+	   AUC = map_dbl(list(rpart_roc,
+	   				      rf_roc,
+	   				      xgb_roc, 
+	   				      xgb_roc2, 
+	   				      xgb_roc3), function(roc_obj) {
+	   				      	  round(as.numeric(auc(roc_obj)), 2)
+	   }
+	   )) %>% 
+	ggplot(aes(x = factor(model), y = AUC, fill = model, label = AUC)) + 
+	geom_col(color = "light grey") + 
+	labs(y = "AUC", x = "") + 
+	scale_fill_viridis(option = "B", discrete = TRUE) + 
+	scale_y_continuous(breaks = seq(from = 0, to = 1, by = 0.2)) +
+	geom_hline(yintercept = 1, col = inferno(9)[5]) + 
+	guides(fill = FALSE) + 
+	theme_minimal() + 
+	theme(axis.text.x = element_text(size = 8)) + 
+	geom_text(nudge_y = 0.05, size = 5)
+```
+
+The XGBoost model with all features does perform better than either of the models excluding `age` and/or `gender`, but both of those models still perform substantially better than random forest or decision tree. As mentioned above, algorithmic bias is a complex topic that deserves in-depth treatment, but these results certainly indicate that it is possible to produce high-performing models without considering protected characteristics.
+
+# Lift Chart
+
+Can also use Lift Charts (also called Gains Charts) to illustrate model performance. So instead of setting a decision threshold, can look at how well-ordered the predictions are (from modt to least likely). How quickly does each model find positive results?
+
+```{r}
+# create a basic decision tree to use as a baseline
+basic_rpart <- rpart::rpart(outcome ~ ., train_df, 
+                            control = list(maxdepth = 2))
+lift_data <- tibble(xgb1 = xgb_preds, 
+                    xgb2 = xgb_preds2, 
+                    xgb3 = xgb_preds3, 
+                    rf = predict(rf_model, 
+                                 test_df, 
+                                 type = "prob")[, "good"], 
+                    rpart_full = predict(rpart_model, 
+                                    test_df, 
+                                    type = "prob")[, "good"], 
+                    rpart_basic = predict(basic_rpart, 
+                                          test_df, 
+                                          type = "prob")[, "good"], 
+                    outcome = test_df$outcome)
+caret::lift(outcome ~ xgb1 + xgb2 + xgb3 + rf + rpart_full + rpart_basic, 
+            data = lift_data, 
+            class = "good") %>% 
+    ggplot()
+```
+
+
+[1]: https://archive.ics.uci.edu/ml/index.php
+[2]: https://xgboost.ai/
+[3]: http://science.sciencemag.org/content/356/6334/183
+[4]: https://www.propublica.org/article/machine-bias-risk-assessments-in-criminal-sentencing
+[5]: https://www.theverge.com/2018/1/12/16882408/google-racist-gorillas-photo-recognition-algorithm-ai
+[6]: https://www.legislation.gov.uk/ukpga/2010/15/contents
